@@ -5,6 +5,40 @@ independently of delivery. No deployment, broadcast, dependency, build-configura
 or payment-token change was made. Constructors and the existing five-field
 `purchases(uint256)` ABI remain compatible with the supplied factory requirements.
 
+## Revision of 2026-10-15: the two remaining owner-trust gaps
+
+Continuation from the accepted tree at `3cf22eb`, which passed **111 tests**
+locally with the verifier seed (the assignment text says 122; the count in the
+tree is 111). Both imported findings were reproduced before anything changed:
+the two pinned proofs, copied to disposable `test/scratch/`, failed on the
+original source exactly as reported (`owner minted the capped piece with no
+notice ... 1 != 0`; `second grant took effect immediately with no 7-day notice`;
+`re-grant of the revoked box took effect immediately`) and pass on the revised
+tree. Every other behaviour is unchanged.
+
+| Files | Change | Requirement / reproduced finding |
+| --- | --- | --- |
+| `src/OGClubBox.sol` | Fifth constructor argument `seasonNotice_` stored in `uint256 public immutable seasonNotice`; the constructor reverts with `InvalidSeasonNotice(notice, maximum)` above the new `MAX_SEASON_NOTICE` (30 days). `createSeason` reverts with `SeasonOpensTooSoon(opensAt, earliest)` unless `opensAt >= block.timestamp + seasonNotice`, checked right after the existing parameter checks so their errors still surface first. Seasons stay immutable; `closeSeason` and `cancelSeason` are untouched. With a notice of 0 a season may open in the creating block, but a backdated `opensAt` is now refused (it was equivalent to opening at once). | Launch rule 1; audit `aff3932d52a6` (medium), reproduced. |
+| `src/OGClubFurniture.sol` | `bool public bootstrapped`. `grantMinter` takes the immediate path only while the flag is clear, and sets it there; every later grant is a `MINTER_DELAY` proposal whatever `totalSupply()` is, including a re-grant of the revoked box. A reverted grant (zero address, non-owner) does not spend the bootstrap. `activateMinter`, `cancelMinter`, `revokeMinter` and `mintBatch` are unchanged. | Launch rule 2; audit `3561810c070a` (medium), reproduced. |
+| `script/Deploy.s.sol` | Reads `SEASON_NOTICE` and passes it as the fifth argument; `deploy(token, vault, owner, seasonNotice)`. | Both constructors must still be deployable by the script and the factory. |
+| `launch.json` | Fifth `OGClubBox` argument `"0"` (test-network notice); notes rewritten for the one-bootstrap grant rule, the season notice and the new post-deploy order. Keys and note length (under 4,000 characters) unchanged. | Audit `21bbf96efece` (info): the manifest and notes went stale with the fixes; the assignment asks for the update explicitly. |
+| `test/SeasonNotice.t.sol` (new) | Box with a seven-day notice: revert one second short of the notice and at `opensAt = 0`, success at exactly `now + notice`, a fuzzed boundary at arbitrary creation times, other parameter errors still first, the audit scenario (the owner cannot create an instant 1-wei season with a near-certain capped piece, cannot buy from the announced one before its notice, and holds nothing until it opens), close and cancel as before, immutable terms. | Tests requested for rule 1. |
+| `test/Deployment.t.sol` | Constructor and script calls pass the notice; new test: 30 days accepted, 30 days + 1 and `uint256.max` refused through the constructor and the script, `seasonNotice()` readable, no setter. | Constructor bound, script and immutability. |
+| `test/Seasons.t.sol` | `test_CreateValidation` uses `opensAt = 1000` (the current timestamp) instead of a past `opensAt`, so each call still hits the error it was written for. New `test_ZeroNoticeSeasonOpensAtOnce`: with notice 0 a season opening in the creating block sells and opens as before, and only a past `opensAt` is refused. `test_BuyRequiresTheBoxToBeAnAuthorizedMinter` now re-grants through the seven-day proposal and buys from a fresh season after it. | Rule 1 with notice 0 "behaves as today"; rule 2. |
+| `test/EdgeCases.t.sol` | The fuzzed round-trip bounds `opensAt` at or after the current timestamp. | Rule 1. |
+| `test/OGClubFurniture.t.sol` | `test_FreshGrantsAreImmediateAndEmitTheFullMinterList` (several immediate grants) replaced by `test_OnlyTheFirstGrantIsImmediateEvenBeforeAnyMint`. New: a rejected grant does not spend the bootstrap; re-granting the revoked first minter waits with zero supply, through cancel and re-proposal; fuzz: every grant after the first waits seven days whatever the addresses and elapsed time. | Tests requested for rule 2. |
+| `test/DeliveryEdges.t.sol`, `test/Delivery.t.sol`, `test/helpers/BoxTestBase.sol` | `test_ImmediateGrantStaysOpenWhileOnlyUndeliveredRollsExist` (old rule) replaced by `test_SecondGrantWaitsEvenWhileOnlyUndeliveredRollsExist`: sales started, a roll stored, `totalSupply() == 0`, a new minter and the box both wait seven days, and the stored roll delivers after activation. `test_ZeroAmountMintsLeaveSupplyZeroAndGrantsImmediate` became `...ButGrantsStillWait`. Every re-grant of the revoked box in these files goes through the new `regrantBox()` helper, which asserts the proposal, warps seven days and activates. `deployBox(token)` gives the payment-token tests a second box over its own furniture, since a second box on the shared furniture would no longer be immediate. | Rule 2: re-granting a revoked box waits, opens during the delay store their rolls. |
+| `test/MinterLifecycleInvariant.t.sol` | The handler's `grant` no longer branches on supply: it asserts `bootstrapped()` and treats every grant as a proposal; `immediateGrants` became `grantsAfterBootstrap`. Seeding proposes candidate A before any delivery (previously an immediate grant) and activates it after the seven-day warp. The invariant asserts the flag stays set. | Rule 2 in the stateful suite. |
+| `test/Payments.t.sol`, `test/MultiActorInvariant.t.sol` | Pass the fifth constructor argument (0). | Constructor change. |
+| `README.md` | Owner powers: the season-notice rule (replacing the per-season trust assumption) and the one-bootstrap grant rule; constructor table, script variables, local-check seed; post-deploy steps: grant the box first, create each season at least `seasonNotice` before it opens. | Requested README changes. |
+
+Results on the revised tree with the verifier seed
+`0xd7cbf984d9643a3a39694e4c2b43fdd2684bdc6f7f33900f61d9d2eb94626e58`:
+**123 permanent tests passed, zero failed or skipped** (126 with the two proofs
+in disposable `test/scratch/`). `forge build` and `forge fmt --check` pass. The
+protected factory and owner probes were read; they need verifier-generated
+inputs and were not executed here. No deployment was performed.
+
 ## Changes and reasons
 
 | Files | Change | Requirement / reproduced finding |

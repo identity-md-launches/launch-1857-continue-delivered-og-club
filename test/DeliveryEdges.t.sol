@@ -97,8 +97,9 @@ contract DeliveryEdgesTest is BoxTestBase {
         vm.expectRevert(abi.encodeWithSelector(OGClubBox.AlreadyOpened.selector, purchase));
         box.open(purchase, header);
 
-        // Nothing minted yet, so the box is re-authorized at once; anyone delivers exactly the stored roll.
-        furniture.grantMinter(address(box));
+        // Re-authorizing the box waits seven days (the bootstrap grant is spent); then anyone delivers exactly
+        // the stored roll.
+        regrantBox();
         vm.expectEmit(true, true, false, true, address(box));
         emit Delivered(purchase, buyer);
         vm.prank(stranger);
@@ -187,8 +188,8 @@ contract DeliveryEdgesTest is BoxTestBase {
             if (writes[i] == storedLengthSlot(failed)) wroteLength = true;
         }
         assertTrue(wroteLength);
-        // Nothing minted yet, so the box is re-authorized at once.
-        furniture.grantMinter(address(box));
+        // Re-authorizing the box waits seven days; the stored roll and the pending header are unaffected.
+        regrantBox();
 
         vm.record();
         box.open(delivered, header);
@@ -266,8 +267,8 @@ contract DeliveryEdgesTest is BoxTestBase {
         box.open(purchase, header);
         uint256[] memory secondExpected = box.previewOpen(second, randao);
         box.open(second, header);
-        // Nothing minted yet, so the box is re-authorized at once.
-        furniture.grantMinter(address(box));
+        // Re-authorizing the box waits seven days; both stored rolls survive it.
+        regrantBox();
         vm.prank(caller);
         vm.expectRevert(abi.encodeWithSelector(OGClubBox.NotBuyer.selector, purchase));
         box.deliverTo(purchase, to);
@@ -318,8 +319,8 @@ contract DeliveryEdgesTest is BoxTestBase {
         box.deliver(purchase);
         assertFalse(box.delivered(purchase));
         assertEq(box.getStoredItems(purchase), expected);
-        // Nothing was ever minted, so the furniture owner can still re-authorize the box at once.
-        furniture.grantMinter(address(box));
+        // The furniture owner re-authorizes the box through the seven-day proposal; the roll waits for it.
+        regrantBox();
         vm.prank(stranger);
         box.deliver(purchase);
         assertTrue(box.delivered(purchase));
@@ -352,7 +353,7 @@ contract DeliveryEdgesTest is BoxTestBase {
         }
         box.open(neverOpened, "");
         assertEq(box.getStoredItems(neverOpened), fallbacks);
-        furniture.grantMinter(address(box));
+        regrantBox();
         box.deliver(opened);
         box.deliver(neverOpened);
         assertEq(furniture.balanceOf(buyer, 1), countOf(expected, 1) + 10);
@@ -360,43 +361,60 @@ contract DeliveryEdgesTest is BoxTestBase {
         assertEq(furniture.balanceOf(buyer, 3), countOf(expected, 3));
     }
 
-    // ----------------------------------------------------------------- the "nothing minted" rule
+    // ----------------------------------------------------------------- the one-bootstrap rule
 
-    /// @dev The immediate-grant path is keyed on supply, not on sales: stored, undelivered rolls do not
-    ///      close it. This is the behavior the brief specifies; it is also recorded in the findings file.
-    function test_ImmediateGrantStaysOpenWhileOnlyUndeliveredRollsExist() public {
+    /// @dev The immediate-grant path is spent by the first grant ever (the box, in setUp). Stored, undelivered
+    ///      rolls keep totalSupply() at zero, yet a new minter still waits seven days, and so does the box when
+    ///      it is granted again; opens during that wait store their rolls and deliver afterwards.
+    function test_SecondGrantWaitsEvenWhileOnlyUndeliveredRollsExist() public {
+        assertTrue(furniture.bootstrapped());
         uint256 purchase = buy(10);
         furniture.revokeMinter(address(box));
         box.open(purchase, ready(purchase, keccak256("undelivered only")));
         assertEq(box.getStoredItems(purchase).length, 10);
         assertEq(furniture.totalSupply(), 0);
         furniture.grantMinter(stranger);
-        assertTrue(furniture.minters(stranger));
-        assertEq(furniture.pendingMinters(stranger), 0);
+        assertFalse(furniture.minters(stranger));
+        assertEq(furniture.pendingMinters(stranger), block.timestamp + 7 days);
         uint256[] memory ids = new uint256[](1);
         uint256[] memory amounts = new uint256[](1);
         ids[0] = 3;
         amounts[0] = 1;
         vm.prank(stranger);
+        vm.expectRevert(abi.encodeWithSelector(OGClubFurniture.NotMinter.selector, stranger));
         furniture.mintBatch(stranger, ids, amounts);
-        // From the first real mint on, every further grant waits.
+        // The box itself is no exception.
         furniture.grantMinter(address(box));
         assertFalse(furniture.minters(address(box)));
         assertEq(furniture.pendingMinters(address(box)), block.timestamp + 7 days);
+        vm.warp(block.timestamp + 7 days);
+        furniture.activateMinter(address(box));
+        box.deliver(purchase);
+        assertTrue(box.delivered(purchase));
+        assertEq(furniture.totalSupply(), 10);
     }
 
-    function test_ZeroAmountMintsLeaveSupplyZeroAndGrantsImmediate() public {
+    /// @dev Zero-amount mints leave supply at zero; that no longer matters, since the delay keys on the
+    ///      bootstrap flag and not on supply.
+    function test_ZeroAmountMintsLeaveSupplyZeroButGrantsStillWait() public {
         uint256[] memory ids = new uint256[](2);
         uint256[] memory amounts = new uint256[](2);
         ids[0] = 1;
         ids[1] = 2;
         furniture.grantMinter(stranger);
+        assertFalse(furniture.minters(stranger));
+        vm.warp(furniture.pendingMinters(stranger));
+        furniture.activateMinter(stranger);
         vm.prank(stranger);
         furniture.mintBatch(buyer, ids, amounts);
         assertEq(furniture.totalSupply(), 0);
         assertFalse(furniture.exists(1));
         furniture.grantMinter(buyer);
-        assertTrue(furniture.minters(buyer));
+        assertFalse(furniture.minters(buyer));
+        assertEq(furniture.pendingMinters(buyer), block.timestamp + 7 days);
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(stranger);
+        furniture.activateMinter(buyer);
         amounts[0] = 1;
         vm.prank(buyer);
         furniture.mintBatch(buyer, ids, amounts);
@@ -406,8 +424,8 @@ contract DeliveryEdgesTest is BoxTestBase {
         assertEq(furniture.pendingMinters(vault), block.timestamp + 7 days);
     }
 
-    /// @dev Supply can never return to zero: there is no burn and transfers to the zero address revert,
-    ///      so once the delay applies it applies forever.
+    /// @dev Supply can never return to zero (there is no burn and transfers to the zero address revert), and the
+    ///      bootstrap flag is never cleared, so once the delay applies it applies forever.
     function test_SupplyCannotReturnToZeroSoTheDelayIsPermanent() public {
         uint256 purchase = buy(1);
         box.open(purchase, ready(purchase, keccak256("permanent")));
@@ -429,6 +447,7 @@ contract DeliveryEdgesTest is BoxTestBase {
             );
         assertFalse(ok);
         assertEq(furniture.totalSupply(), 1);
+        assertTrue(furniture.bootstrapped());
         furniture.grantMinter(stranger);
         assertFalse(furniture.minters(stranger));
         assertGt(furniture.pendingMinters(stranger), 0);

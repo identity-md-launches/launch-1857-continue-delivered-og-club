@@ -19,6 +19,9 @@ contract OGClubFurniture is ERC1155, ERC1155Supply, ERC2981, Ownable2Step {
 
     string public baseURI;
     bool public metadataFrozen;
+    /// @notice Set by the first successful grantMinter, the one immediate grant (meant for the box right after
+    ///         deployment). Every later grant is a MINTER_DELAY proposal whatever the supply.
+    bool public bootstrapped;
     mapping(address minter => bool allowed) public minters;
     mapping(address minter => uint256 activatesAt) public pendingMinters;
 
@@ -44,11 +47,13 @@ contract OGClubFurniture is ERC1155, ERC1155Supply, ERC2981, Ownable2Step {
         emit RoyaltySet(royaltyReceiver, 500);
     }
 
-    /// @notice Authorize immediately before the first mint, otherwise propose activation in seven days.
-    /// @dev Re-proposing restarts the delay. An existing authorization stays active until revoked.
+    /// @notice The first grant ever takes effect at once; every later one proposes activation in seven days.
+    /// @dev Re-proposing restarts the delay. An existing authorization stays active until revoked. Supply plays
+    ///      no part: a second grant waits even while nothing has been delivered yet.
     function grantMinter(address minter) external onlyOwner {
         if (minter == address(0)) revert ZeroAddress();
-        if (totalSupply() == 0) {
+        if (!bootstrapped) {
+            bootstrapped = true;
             delete pendingMinters[minter];
             minters[minter] = true;
             emit MinterSet(minter, true);

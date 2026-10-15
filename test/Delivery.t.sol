@@ -80,8 +80,8 @@ contract DeliveryTest is BoxTestBase {
             assertEq(expected[i], 1);
         }
         assertEq(box.minted(seasonId, 1), 10);
-        // Nothing has been minted yet: initial deployment authorization is still immediate.
-        furniture.grantMinter(address(box));
+        // Re-authorizing the box is a seven-day proposal even though nothing has been minted yet.
+        regrantBox();
         box.deliver(purchase);
         assertEq(furniture.balanceOf(buyer, 1), 10);
         assertTrue(box.delivered(purchase));
@@ -197,7 +197,7 @@ contract DeliveryTest is BoxTestBase {
         furniture.revokeMinter(address(box));
         box.open(purchase, ready(purchase, bytes32(0)));
         assertEq(box.getStoredItems(purchase), new uint256[](10));
-        furniture.grantMinter(address(box));
+        regrantBox();
         box.deliver(purchase);
         assertEq(furniture.balanceOf(buyer, 0), 10);
         assertEq(box.minted(seasonId, 0), 10);

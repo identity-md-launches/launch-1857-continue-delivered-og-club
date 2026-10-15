@@ -55,48 +55,48 @@ contract SeasonsTest is BoxTestBase {
     function test_CreateValidation() public {
         OGClubBox.Entry[] memory entries = defaultEntries();
         vm.expectRevert(OGClubBox.InvalidEntryCount.selector);
-        box.createSeason(1, 1, 2, 0, 1, new OGClubBox.Entry[](0));
+        box.createSeason(1, 1000, 2000, 0, 1, new OGClubBox.Entry[](0));
         vm.expectRevert(OGClubBox.InvalidEntryCount.selector);
-        box.createSeason(1, 1, 2, 0, 1, new OGClubBox.Entry[](33));
+        box.createSeason(1, 1000, 2000, 0, 1, new OGClubBox.Entry[](33));
         vm.expectRevert(OGClubBox.InvalidSeasonParameters.selector);
-        box.createSeason(0, 1, 2, 0, 1, entries);
+        box.createSeason(0, 1000, 2000, 0, 1, entries);
         vm.expectRevert(OGClubBox.InvalidSeasonParameters.selector);
-        box.createSeason(1, 2, 2, 0, 1, entries);
+        box.createSeason(1, 2000, 2000, 0, 1, entries);
         vm.expectRevert(OGClubBox.InvalidSeasonParameters.selector);
-        box.createSeason(1, 3, 2, 0, 1, entries);
+        box.createSeason(1, 3000, 2000, 0, 1, entries);
         vm.expectRevert(OGClubBox.InvalidSeasonParameters.selector);
-        box.createSeason(1, 1, 2, 10_001, 1, entries);
+        box.createSeason(1, 1000, 2000, 10_001, 1, entries);
         entries[1].tier = 5;
         vm.expectRevert(abi.encodeWithSelector(OGClubBox.InvalidEntry.selector, 1));
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         entries = defaultEntries();
         entries[1].weight = 0;
         vm.expectRevert(abi.encodeWithSelector(OGClubBox.InvalidEntry.selector, 1));
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         entries = defaultEntries();
         entries[1].itemId = 1;
         vm.expectRevert(abi.encodeWithSelector(OGClubBox.DuplicateItem.selector, 1));
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         entries = defaultEntries();
         vm.expectRevert(OGClubBox.InvalidFallback.selector);
-        box.createSeason(1, 1, 2, 0, 99, entries);
+        box.createSeason(1, 1000, 2000, 0, 99, entries);
         entries[0].cap = 1;
         vm.expectRevert(OGClubBox.InvalidFallback.selector);
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         entries[1].cap = 0; // An unlimited non-fallback does not make a capped fallback valid.
         vm.expectRevert(OGClubBox.InvalidFallback.selector);
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         entries = defaultEntries();
         entries[0].tier = 1;
         vm.expectRevert(OGClubBox.InvalidFallback.selector);
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         entries = defaultEntries();
         entries[0].weight = type(uint256).max;
         vm.expectRevert(OGClubBox.WeightOverflow.selector);
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         entries[0].weight = box.MAX_TOTAL_WEIGHT(); // Plus the other two weights exceeds the bound.
         vm.expectRevert(OGClubBox.WeightOverflow.selector);
-        box.createSeason(1, 1, 2, 0, 1, entries);
+        box.createSeason(1, 1000, 2000, 0, 1, entries);
         assertEq(box.seasonCount(), 1);
         entries[0].weight = box.MAX_TOTAL_WEIGHT() - 40; // Sums to exactly the bound.
         uint256 wide = box.createSeason(1, 1000, 100_000, 0, 1, entries);
@@ -117,9 +117,28 @@ contract SeasonsTest is BoxTestBase {
         assertEq(token.balanceOf(vault), 0);
         assertEq(token.balanceOf(box.BURN_ADDRESS()), 0);
         assertEq(box.purchaseCount(), 0);
-        furniture.grantMinter(address(box));
-        buy(1);
+        // The bootstrap grant was spent at deployment: re-granting the box is a seven-day proposal.
+        regrantBox();
+        uint256 reopened = box.createSeason(101, block.timestamp, block.timestamp + 1 days, 3333, 1, defaultEntries());
+        vm.prank(buyer);
+        box.buy(reopened, 1);
         assertEq(box.purchaseCount(), 1);
+    }
+
+    /// @dev Season notice 0 (the test-network value): a season may open in the very block it is created and
+    ///      sells at once, exactly as before the notice existed; only a backdated opensAt is refused.
+    function test_ZeroNoticeSeasonOpensAtOnce() public {
+        assertEq(box.seasonNotice(), 0);
+        uint256 now_ = block.timestamp;
+        vm.expectRevert(abi.encodeWithSelector(OGClubBox.SeasonOpensTooSoon.selector, now_ - 1, now_));
+        box.createSeason(1, now_ - 1, now_ + 1 days, 0, 1, defaultEntries());
+        uint256 instant = box.createSeason(1, now_, now_ + 1 days, 0, 1, defaultEntries());
+        assertEq(box.getSeason(instant).opensAt, now_);
+        vm.prank(buyer);
+        uint256 purchase = box.buy(instant, 10);
+        bytes32 randao = keccak256("zero notice");
+        bytes memory header = ready(purchase, randao);
+        assertOpenMatches(purchase, randao, header, false);
     }
 
     function test_MaximumEntryCountAndIdZeroSupported() public {

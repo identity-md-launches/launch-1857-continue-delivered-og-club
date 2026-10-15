@@ -28,12 +28,33 @@ abstract contract BoxTestBase is Test, ERC1155Holder {
         vault = makeAddr("vault");
         token = new MockOG(address(this));
         furniture = new OGClubFurniture(address(this), vault);
-        box = new OGClubBox(token, furniture, vault, address(this));
-        furniture.grantMinter(address(box));
+        // Season notice 0, as on the test network: seasons may open in the block they are created.
+        box = new OGClubBox(token, furniture, vault, address(this), 0);
+        furniture.grantMinter(address(box)); // The one immediate grant, right after deployment.
         token.mint(buyer, 1_000_000 ether);
         vm.prank(buyer);
         token.approve(address(box), type(uint256).max);
         seasonId = box.createSeason(101, 1000, 100_000, 3333, 1, defaultEntries());
+    }
+
+    /// @dev A second box over its own furniture, for tests that only exercise a different payment token.
+    ///      It cannot share `furniture`: only the first grant there was immediate, so a second box would
+    ///      wait seven days for activation.
+    function deployBox(IERC20 token_) internal returns (OGClubBox other) {
+        OGClubFurniture otherFurniture = new OGClubFurniture(address(this), vault);
+        other = new OGClubBox(token_, otherFurniture, vault, address(this), 0);
+        otherFurniture.grantMinter(address(other));
+    }
+
+    /// @dev Re-authorize the box after a revoke: the bootstrap grant is spent, so this is a seven-day proposal.
+    function regrantBox() internal {
+        furniture.grantMinter(address(box));
+        assertFalse(furniture.minters(address(box)), "a re-grant must not be immediate");
+        assertEq(furniture.pendingMinters(address(box)), block.timestamp + furniture.MINTER_DELAY());
+        vm.warp(block.timestamp + furniture.MINTER_DELAY());
+        vm.prank(stranger);
+        furniture.activateMinter(address(box));
+        assertTrue(furniture.minters(address(box)));
     }
 
     function defaultEntries() internal pure returns (OGClubBox.Entry[] memory entries) {

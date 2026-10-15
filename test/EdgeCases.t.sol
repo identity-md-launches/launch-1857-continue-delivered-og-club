@@ -134,6 +134,7 @@ contract EdgeCasesTest is BoxTestBase {
         bytes32 entropy
     ) public {
         price = uint64(bound(price, 1, type(uint64).max));
+        opensAt = uint32(bound(opensAt, block.timestamp, type(uint32).max)); // never before now + seasonNotice (0)
         duration = uint32(bound(duration, 1, type(uint32).max));
         burnBps = uint16(bound(burnBps, 0, 10_000));
         entryCount = uint8(bound(entryCount, 1, 32));

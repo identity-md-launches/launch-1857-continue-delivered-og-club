@@ -164,20 +164,96 @@ contract FurnitureTest is Test {
         furniture.mintBatch(buyer, ids, amounts);
     }
 
-    function test_FreshGrantsAreImmediateAndEmitTheFullMinterList() public {
-        address[3] memory initialMinters = [minter, buyer, recipient];
-        for (uint256 i; i < initialMinters.length; ++i) {
+    /// @dev Exactly one grant is ever immediate: the first. The next grants are seven-day proposals even though
+    ///      nothing has been minted, and activating them is the only way they become minters.
+    function test_OnlyTheFirstGrantIsImmediateEvenBeforeAnyMint() public {
+        assertFalse(furniture.bootstrapped());
+        vm.expectEmit(true, false, false, true, address(furniture));
+        emit MinterSet(minter, true);
+        furniture.grantMinter(minter);
+        assertTrue(furniture.bootstrapped());
+        assertTrue(furniture.minters(minter));
+        assertEq(furniture.pendingMinters(minter), 0);
+        assertEq(furniture.totalSupply(), 0);
+
+        address[2] memory later = [buyer, recipient];
+        uint256 activatesAt = block.timestamp + 7 days;
+        for (uint256 i; i < later.length; ++i) {
             vm.expectEmit(true, false, false, true, address(furniture));
-            emit MinterSet(initialMinters[i], true);
-            furniture.grantMinter(initialMinters[i]);
-            assertTrue(furniture.minters(initialMinters[i]));
-            assertEq(furniture.pendingMinters(initialMinters[i]), 0);
+            emit MinterProposed(later[i], activatesAt);
+            furniture.grantMinter(later[i]);
+            assertFalse(furniture.minters(later[i]), "a second grant must not be immediate");
+            assertEq(furniture.pendingMinters(later[i]), activatesAt);
         }
         assertEq(furniture.totalSupply(), 0);
         (uint256[] memory ids, uint256[] memory amounts) = arrays();
         vm.prank(buyer);
+        vm.expectRevert(abi.encodeWithSelector(OGClubFurniture.NotMinter.selector, buyer));
+        furniture.mintBatch(buyer, ids, amounts);
+        vm.warp(activatesAt);
+        vm.prank(recipient);
+        furniture.activateMinter(buyer);
+        vm.prank(buyer);
         furniture.mintBatch(buyer, ids, amounts);
         assertEq(furniture.totalSupply(), 9);
+        assertTrue(furniture.bootstrapped());
+    }
+
+    /// @dev A grant that reverts does not spend the bootstrap; the first successful one does, whoever it names.
+    function test_RejectedGrantDoesNotSpendTheBootstrap() public {
+        vm.expectRevert(OGClubFurniture.ZeroAddress.selector);
+        furniture.grantMinter(address(0));
+        assertFalse(furniture.bootstrapped());
+        vm.prank(buyer);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, buyer));
+        furniture.grantMinter(buyer);
+        assertFalse(furniture.bootstrapped());
+        furniture.grantMinter(recipient);
+        assertTrue(furniture.bootstrapped());
+        assertTrue(furniture.minters(recipient));
+    }
+
+    /// @dev Revoking the first minter and granting it again waits the full delay, with supply still zero;
+    ///      cancel and revoke behave on that proposal exactly as on any other, and the flag never clears.
+    function test_RegrantingTheRevokedFirstMinterWaitsWithZeroSupply() public {
+        furniture.grantMinter(minter);
+        furniture.revokeMinter(minter);
+        assertFalse(furniture.minters(minter));
+        assertEq(furniture.totalSupply(), 0);
+        assertTrue(furniture.bootstrapped());
+        uint256 activatesAt = block.timestamp + 7 days;
+        vm.expectEmit(true, false, false, true, address(furniture));
+        emit MinterProposed(minter, activatesAt);
+        furniture.grantMinter(minter);
+        assertFalse(furniture.minters(minter), "re-grant of the revoked first minter took effect immediately");
+        assertEq(furniture.pendingMinters(minter), activatesAt);
+        vm.warp(activatesAt - 1);
+        vm.expectRevert(abi.encodeWithSelector(OGClubFurniture.MinterDelayNotElapsed.selector, minter, activatesAt));
+        furniture.activateMinter(minter);
+        furniture.cancelMinter(minter);
+        assertEq(furniture.pendingMinters(minter), 0);
+        furniture.grantMinter(minter);
+        assertEq(furniture.pendingMinters(minter), block.timestamp + 7 days);
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(buyer);
+        furniture.activateMinter(minter);
+        assertTrue(furniture.minters(minter));
+        (uint256[] memory ids, uint256[] memory amounts) = arrays();
+        vm.prank(minter);
+        furniture.mintBatch(buyer, ids, amounts);
+        assertEq(furniture.totalSupply(), 9);
+    }
+
+    /// @dev Whatever the supply (zero, or after zero-amount mints), only the first grant is immediate.
+    function testFuzz_EveryGrantAfterTheFirstWaitsSevenDays(address first, address second, uint32 elapsed) public {
+        vm.assume(first != address(0) && second != address(0));
+        furniture.grantMinter(first);
+        assertTrue(furniture.minters(first));
+        vm.warp(block.timestamp + elapsed);
+        furniture.grantMinter(second);
+        assertEq(furniture.minters(second), first == second, "a later grant changed the live role");
+        assertEq(furniture.pendingMinters(second), block.timestamp + 7 days);
+        assertEq(furniture.totalSupply(), 0);
     }
 
     function testFuzz_AfterFirstMintMustWaitAndAnyoneCanActivate(uint32 elapsed) public {

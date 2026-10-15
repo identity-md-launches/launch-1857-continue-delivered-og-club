@@ -57,9 +57,14 @@ contract OGClubBox is Ownable2Step, ReentrancyGuard {
     uint256 public constant OPEN_DELIVERY_GAS = OPEN_MINT_GAS_LIMIT + DELIVERY_RESERVE_GAS;
     /// @notice Upper bound of a season's summed weights, so `seed % totalWeight` is unbiased to within 2^-128.
     uint256 public constant MAX_TOTAL_WEIGHT = 1 << 128;
+    /// @notice Longest season notice a deployment may fix at construction.
+    uint256 public constant MAX_SEASON_NOTICE = 30 days;
 
     IERC20 public immutable token;
     OGClubFurniture public immutable furniture;
+    /// @notice Seconds every season must be announced ahead of its opening: createSeason requires
+    ///         `opensAt >= block.timestamp + seasonNotice`, so no season can sell before it is public.
+    uint256 public immutable seasonNotice;
     address public vault;
     bool public paused;
     uint256 public seasonCount;
@@ -74,6 +79,8 @@ contract OGClubBox is Ownable2Step, ReentrancyGuard {
     error InvalidAddress();
     error InvalidEntryCount();
     error InvalidSeasonParameters();
+    error InvalidSeasonNotice(uint256 notice, uint256 maximum);
+    error SeasonOpensTooSoon(uint256 opensAt, uint256 earliest);
     error InvalidEntry(uint256 index);
     error DuplicateItem(uint256 itemId);
     error InvalidFallback();
@@ -131,15 +138,23 @@ contract OGClubBox is Ownable2Step, ReentrancyGuard {
     /// @param furniture_ Furniture contract which must authorize this box as a minter after deployment.
     /// @param vault_ Nonzero beneficiary of the unburned payment share.
     /// @param initialOwner Account allowed to create/stop seasons and manage sales settings.
-    constructor(IERC20 token_, OGClubFurniture furniture_, address vault_, address initialOwner) Ownable(initialOwner) {
+    /// @param seasonNotice_ Seconds between a season's creation and the earliest `opensAt` it may carry, at most
+    ///        MAX_SEASON_NOTICE. Fixed for the life of the contract.
+    constructor(IERC20 token_, OGClubFurniture furniture_, address vault_, address initialOwner, uint256 seasonNotice_)
+        Ownable(initialOwner)
+    {
         if (address(token_) == address(0) || address(furniture_) == address(0)) revert InvalidAddress();
+        if (seasonNotice_ > MAX_SEASON_NOTICE) revert InvalidSeasonNotice(seasonNotice_, MAX_SEASON_NOTICE);
         token = token_;
         furniture = furniture_;
+        seasonNotice = seasonNotice_;
         _setVault(vault_);
     }
 
     /// @notice Create a season with permanent terms and at least one unlimited Common fallback.
-    /// @dev IDs start at 1. Summed weights may not exceed MAX_TOTAL_WEIGHT. Seasons may overlap.
+    /// @dev IDs start at 1. Summed weights may not exceed MAX_TOTAL_WEIGHT. Seasons may overlap. A season
+    ///      must open no earlier than `block.timestamp + seasonNotice`, so its terms are public for the
+    ///      whole notice before anyone, the owner included, can buy from it.
     function createSeason(
         uint256 price,
         uint256 opensAt,
@@ -150,6 +165,8 @@ contract OGClubBox is Ownable2Step, ReentrancyGuard {
     ) external onlyOwner returns (uint256 seasonId) {
         if (entries.length == 0 || entries.length > 32) revert InvalidEntryCount();
         if (price == 0 || opensAt >= closesAt || burnBps > BPS) revert InvalidSeasonParameters();
+        uint256 earliest = block.timestamp + seasonNotice;
+        if (opensAt < earliest) revert SeasonOpensTooSoon(opensAt, earliest);
         uint256 totalWeight;
         bool validFallback;
         for (uint256 i; i < entries.length; ++i) {

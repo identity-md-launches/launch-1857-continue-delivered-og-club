@@ -170,10 +170,21 @@ cannot subsequently be cancelled. Cancellation must occur strictly before
 and change the vault for future purchases. A season's percentage split stays
 fixed, but its vault recipient follows the current vault setting. A new season
 may reuse any piece ID, including one an earlier season sold with a cap, as an
-uncapped entry or fallback: caps are per season, and the box's existing minter
-role is not subject to the furniture's seven-day notice. The box owner's season
-terms are therefore a trust assumption; review each `SeasonCreated` and
-`SeasonEntry` event.
+uncapped entry or fallback: caps are per season.
+
+**Seasons are announced ahead of time.** The box is deployed with an immutable
+`seasonNotice` (seconds, at most `MAX_SEASON_NOTICE` = 30 days; 7 days on
+mainnet, 0 on test networks), readable as `seasonNotice()`. `createSeason`
+reverts with `SeasonOpensTooSoon(opensAt, earliest)` unless
+`opensAt >= block.timestamp + seasonNotice`, so every season's price, odds and
+caps are public for the whole notice before anyone, the owner included, can buy
+from it. This closes the gap where the owner could open a 1-wei season at once
+with a capped piece near-certain and mint it within four blocks, bypassing the
+furniture's seven-day minter notice. With a notice of 0 a season may open in the
+block it is created, but `opensAt` can never be in the past. The notice cannot
+be changed after deployment. Nothing else about seasons changes: terms stay
+immutable once created, and `closeSeason` and `cancelSeason` work as before.
+Review each `SeasonCreated` and `SeasonEntry` event during the notice.
 
 The box owner cannot edit an existing season's price, window, entries, tiers,
 weights, caps, fallback or split; reopen a closed season; replace the token or
@@ -184,9 +195,11 @@ no proxies or upgrade paths.
 
 The furniture owner manages minters through these functions:
 
-- `grantMinter(minter)`: before any furniture has been minted (`totalSupply() == 0`),
-  authorizes immediately and emits `MinterSet(minter, true)`. Once any supply exists,
-  records `pendingMinters(minter) = block.timestamp + MINTER_DELAY` and emits
+- `grantMinter(minter)`: **exactly one grant is ever immediate: the first.** The
+  first successful call authorizes at once, emits `MinterSet(minter, true)` and
+  sets the public `bootstrapped` flag; it is meant for the box, right after
+  deployment. Every later call, whatever `totalSupply()` is, records
+  `pendingMinters(minter) = block.timestamp + MINTER_DELAY` and emits
   `MinterProposed(minter, activatesAt)`. **MINTER_DELAY is seven days.**
 - `activateMinter(minter)`: anyone can call at or after the proposal's timestamp;
   it clears the proposal, authorizes the minter and emits `MinterSet(minter, true)`.
@@ -196,14 +209,18 @@ The furniture owner manages minters through these functions:
 - `revokeMinter(minter)`: owner only, removes authorization immediately, clears
   any proposal, and emits `MinterSet(minter, false)`.
 
-`totalSupply()` counts delivered furniture only. Purchases that were opened but
-whose delivery failed (for example while the box was revoked) do not arm the
-delay: until the first piece is actually minted, every grant stays immediate.
-Re-proposing restarts the full delay; proposing for an active minter leaves its
-existing permission active. Activation and cancellation require a pending
-proposal. `minters(minter)` remains the current authorization view, and
+The delay does not depend on supply. Sales can start and every roll can still
+be undelivered (pending opening, or stored after a `DeliveryFailed`) while
+`totalSupply()` is still zero; a new minter proposed in that state waits the
+full seven days all the same. Re-granting the box after a revoke also waits
+seven days: purchases stay open meanwhile, `open` records and stores their
+rolls, and `deliver` retries them once the box is active again. `bootstrapped`
+is never cleared, so after the first grant no immediate authorization exists
+again. Re-proposing restarts the full delay; proposing for an active minter
+leaves its existing permission active. Activation and cancellation require a
+pending proposal. `minters(minter)` remains the current authorization view, and
 `pendingMinters(minter)` returns zero when nothing is pending. Index `MinterSet`
-from deployment to reconstruct the full active list, including initial grants.
+from deployment to reconstruct the full active list, including the first grant.
 
 The furniture owner can update the metadata prefix until `freezeMetadata()`, and
 set a royalty receiver and rate from 0 through 1000 basis points. Initial
@@ -216,14 +233,14 @@ Ownership itself grants **no ability to move, burn or confiscate anyone's
 furniture**. Holders and approved operators retain standard ERC-1155 transfers;
 there is no public burn function. Authorized minters can still mint any piece in
 any quantity: the delay provides public notice for new permissions, not global
-collection caps. Minters granted before the first mint retain their permission.
-Review the complete initial list and subsequent proposals.
+collection caps. The one immediate minter (the first grant) retains its
+permission until revoked. Review that first grant and every later proposal.
 
 Revoking the box stops new sales and delays delivery, but **never changes a
 recorded roll**. Continue submitting openings within 256 blocks even while the
-box is revoked. After any furniture has been minted, restoring the box also
-requires `grantMinter`, seven days, then `activateMinter`; outstanding deliveries
-can then be retried. Delivery depends on maintaining or restoring this role;
+box is revoked. Restoring the box always requires `grantMinter`, seven days,
+then `activateMinter`, even if nothing has been delivered yet; outstanding
+deliveries can then be retried. Delivery depends on maintaining or restoring this role;
 renouncing furniture ownership after revoking the box without a pending proposal
 would prevent restoration. A purchase nobody opens in time still expires to
 fallbacks. The furniture and box owners may be different accounts.
@@ -242,28 +259,38 @@ chain before enabling sales.
 | Contract | Constructor parameters |
 | --- | --- |
 | `OGClubFurniture` | `initialOwner`, `royaltyReceiver` (both nonzero) |
-| `OGClubBox` | `IERC20 token`, `OGClubFurniture furniture`, `vault`, `initialOwner` (all nonzero) |
+| `OGClubBox` | `IERC20 token`, `OGClubFurniture furniture`, `vault`, `initialOwner` (all nonzero), `seasonNotice` (seconds, at most 30 days) |
 | `MockOG` | `initialRecipient` of its initial test supply |
 
-`script/Deploy.s.sol` reads **TOKEN**, **VAULT**, and **OWNER** from the operator's
-environment. It creates furniture first, then the box. It uses OWNER as the
-initial royalty receiver, a documented script choice that the furniture owner
-can later change. It does not deploy a mock token or create a season. No private
-key is read by the script. The eventual deployer supplies their signer through
-their own Foundry invocation. `deploy(token, vault, owner)` is also callable
-directly for parameterized local tests, without environment variables.
+`seasonNotice` is 7 days on mainnet and 0 on test networks (the Sepolia manifest
+passes `0`). The constructor reverts with `InvalidSeasonNotice` above 30 days.
+
+`script/Deploy.s.sol` reads **TOKEN**, **VAULT**, **OWNER** and **SEASON_NOTICE**
+from the operator's environment. It creates furniture first, then the box. It
+uses OWNER as the initial royalty receiver, a documented script choice that the
+furniture owner can later change. It does not deploy a mock token or create a
+season. No private key is read by the script. The eventual deployer supplies
+their signer through their own Foundry invocation.
+`deploy(token, vault, owner, seasonNotice)` is also callable directly for
+parameterized local tests, without environment variables.
 
 After deployment, the furniture owner must:
 
-1. Call `furniture.grantMinter(box)` with the confirmed box address **right after
-   deployment, before any mint**. This is immediate while `totalSupply() == 0`.
-   Until authorization every `buy` reverts with `BoxNotMinter`. If anything was
-   already minted, wait seven days and call `activateMinter(box)` before sales.
+1. **Grant the box first.** Call `furniture.grantMinter(box)` with the confirmed
+   box address right after deployment, before any other grant. The first
+   `grantMinter` ever is the only immediate one and sets `bootstrapped`; if any
+   other address is granted first, the box becomes a seven-day proposal and
+   needs `activateMinter(box)` before sales. Until authorization every `buy`
+   reverts with `BoxNotMinter`.
 2. Call `furniture.setBaseURI(...)` with the published metadata prefix. Check the
    files, then optionally call `freezeMetadata()`.
 
 The box owner then creates seasons with the intended prices, windows, entries
-and fallback. Confirm token allowances, recipient balances and mint permissions
+and fallback. **Create each season at least `seasonNotice` before it opens**:
+`createSeason` requires `opensAt >= block.timestamp + seasonNotice`, so with the
+mainnet value a season created today can open no earlier than a week from now
+(with 0, any `opensAt` from the current block's timestamp on). Confirm token
+allowances, recipient balances and mint permissions
 before opening sales. Keep the box's minting permission enabled for prompt
 delivery. Monitor `BoxesBought`, obtain headers and submit reveals within the
 256-block window even if minting is disabled. Send `open` with the estimated gas
@@ -312,7 +339,7 @@ With Foundry and Solidity 0.8.26 available, no dependency download is needed:
 
 ```sh
 forge build
-FOUNDRY_FUZZ_SEED=0x5fbefb26c0c2c1788540f6d50945b685a8eec10a4788d431c33daee28f75b7c5 forge test
+FOUNDRY_FUZZ_SEED=0xd7cbf984d9643a3a39694e4c2b43fdd2684bdc6f7f33900f61d9d2eb94626e58 forge test
 forge fmt --check
 ```
 
@@ -322,7 +349,13 @@ Cancun and Prague are embedded, with their original published fields and hashes
 under [test/fixtures](test/fixtures/SOURCES.md). The suite covers payment splits,
 malformed headers, all sale/reveal boundaries, access control, ownership, caps,
 ten-packs, delayed minter activation, rejected delivery, redirection, gas exhaustion
-and reentrancy. `test/OpenGas.t.sol` checks that a short gas limit reverts
+and reentrancy. `test/SeasonNotice.t.sol` deploys a box with a seven-day notice
+and checks the exact `opensAt` boundary, that the owner cannot buy from or mint
+through a new season before its notice, and that close and cancel are unchanged;
+`test/OGClubFurniture.t.sol` and `test/DeliveryEdges.t.sol` check that only the
+first grant is immediate, that a second grant and a re-grant of the revoked box
+wait seven days while `totalSupply()` is still zero, and that opens during that
+wait store their rolls. `test/OpenGas.t.sol` checks that a short gas limit reverts
 without state changes, that the lowest succeeding limit always delivers, and
 that the reserve stores ten distinct IDs at that exact boundary against a
 receiver that burns the whole mint budget. `test/FixedOdds.t.sol` checks that

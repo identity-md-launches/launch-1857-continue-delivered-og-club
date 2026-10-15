@@ -71,8 +71,7 @@ contract PaymentsTest is BoxTestBase {
     function test_FeeOnEitherLegRevertsBothTransfers() public {
         for (uint256 i; i < 2; ++i) {
             FeeToken feeToken = new FeeToken(i == 0 ? box.BURN_ADDRESS() : vault);
-            OGClubBox feeBox = new OGClubBox(feeToken, furniture, vault, address(this));
-            furniture.grantMinter(address(feeBox));
+            OGClubBox feeBox = deployBox(feeToken);
             uint256 season = feeBox.createSeason(10_000, 1000, 100_000, 3000, 1, defaultEntries());
             feeToken.mint(buyer, 10_000);
             vm.prank(buyer);
@@ -105,8 +104,7 @@ contract PaymentsTest is BoxTestBase {
 
     function test_NoReturnTokenSupported() public {
         NoReturnToken noReturn = new NoReturnToken();
-        OGClubBox other = new OGClubBox(IERC20(address(noReturn)), furniture, vault, address(this));
-        furniture.grantMinter(address(other));
+        OGClubBox other = deployBox(IERC20(address(noReturn)));
         uint256 season = other.createSeason(101, 1000, 100_000, 3333, 1, defaultEntries());
         noReturn.mint(buyer, 101);
         vm.prank(buyer);
@@ -120,8 +118,7 @@ contract PaymentsTest is BoxTestBase {
 
     function test_FalseReturnTokenRejected() public {
         FalseReturnToken bad = new FalseReturnToken();
-        OGClubBox other = new OGClubBox(bad, furniture, vault, address(this));
-        furniture.grantMinter(address(other));
+        OGClubBox other = deployBox(bad);
         uint256 season = other.createSeason(101, 1000, 100_000, 0, 1, defaultEntries());
         vm.prank(buyer);
         vm.expectRevert(abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(bad)));
@@ -131,8 +128,7 @@ contract PaymentsTest is BoxTestBase {
 
     function test_TokenCallbackCannotReenter() public {
         ReentrantToken callback = new ReentrantToken();
-        OGClubBox other = new OGClubBox(callback, furniture, vault, address(this));
-        furniture.grantMinter(address(other));
+        OGClubBox other = deployBox(callback);
         uint256 season = other.createSeason(101, 1000, 100_000, 3333, 1, defaultEntries());
         callback.configure(other, season);
         callback.mint(buyer, 101);
@@ -174,8 +170,7 @@ contract PaymentsTest is BoxTestBase {
         assertEq(storedCount, 1);
         // A self-transfer that loses tokens is still refused.
         FeeToken feeToken = new FeeToken(vault);
-        OGClubBox feeBox = new OGClubBox(feeToken, furniture, vault, address(this));
-        furniture.grantMinter(address(feeBox));
+        OGClubBox feeBox = deployBox(feeToken);
         uint256 season = feeBox.createSeason(10_000, 1000, 100_000, 3000, 1, defaultEntries());
         feeToken.mint(vault, 10_000);
         vm.prank(vault);

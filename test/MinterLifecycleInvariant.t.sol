@@ -30,7 +30,7 @@ contract MinterLifecycleHandler is Test, ERC1155Holder {
     mapping(address => uint256) public ghostPending;
     mapping(address => uint256) public ghostProposedAt;
     bool public anythingMinted;
-    uint256 public immediateGrants;
+    uint256 public grantsAfterBootstrap;
     uint256 public delayedActivations;
     uint256 public earlyActivationRejections;
     uint256 public strangerRejections;
@@ -61,7 +61,7 @@ contract MinterLifecycleHandler is Test, ERC1155Holder {
         subjects.push(address(box));
         subjects.push(makeAddr("candidate A"));
         subjects.push(makeAddr("candidate B"));
-        ghostActive[address(box)] = true; // granted in setUp before anything was minted
+        ghostActive[address(box)] = true; // the one bootstrap grant, made in setUp right after deployment
     }
 
     function subjectCount() external view returns (uint256) {
@@ -81,22 +81,19 @@ contract MinterLifecycleHandler is Test, ERC1155Holder {
 
     // ------------------------------------------------------------------ minter lifecycle
 
+    /// @dev The bootstrap grant was spent before the handler existed, so every grant here is a proposal,
+    ///      whatever the supply: zero (nothing delivered yet) or not.
     function grant(uint8 who) external {
         address minter = _subject(who);
         bool wasActive = ghostActive[minter];
+        assertTrue(furniture.bootstrapped(), "the box grant in setUp must have spent the bootstrap");
         vm.prank(owner);
         furniture.grantMinter(minter);
-        if (furniture.totalSupply() == 0) {
-            assertFalse(anythingMinted);
-            ghostActive[minter] = true;
-            ghostPending[minter] = 0;
-            ++immediateGrants;
-        } else {
-            assertTrue(anythingMinted);
-            ghostPending[minter] = block.timestamp + 7 days;
-            ghostProposedAt[minter] = block.timestamp;
-            assertEq(ghostActive[minter], wasActive, "a proposal must not change the live role");
-        }
+        assertTrue(furniture.bootstrapped());
+        ghostPending[minter] = block.timestamp + 7 days;
+        ghostProposedAt[minter] = block.timestamp;
+        assertEq(ghostActive[minter], wasActive, "a proposal must not change the live role");
+        ++grantsAfterBootstrap;
         _checkMinter(minter);
     }
 
@@ -338,17 +335,20 @@ contract MinterLifecycleInvariantTest is BoxTestBase {
         uint256 season = box.createSeason(101, 1000, type(uint256).max, 3333, 1, defaultEntries());
         handler = new MinterLifecycleHandler(box, furniture, token, address(this), season);
         token.mint(address(handler), 1_000_000 ether);
-        // Seed every regime once so no invariant is vacuous: a delivered open (first mint), a revoked box
-        // with a stored roll, a delayed proposal that activates, and a rejected retry.
-        handler.grant(1); // candidate A, immediate: nothing minted yet
+        // Seed every regime once so no invariant is vacuous: a proposal made while nothing is delivered, a
+        // delivered open (first mint), a revoked box with a stored roll, a delayed proposal that activates,
+        // and a rejected retry.
+        handler.grant(1); // candidate A: a proposal, not immediate, although nothing is minted yet
+        handler.activate(1, 1); // too early: rejected
         handler.buy(10);
         handler.open(0, keccak256("lifecycle seed")); // purchase 1 delivered: first mint
         handler.revoke(0);
         handler.buy(3); // rejected: the box is not a minter
-        handler.grant(0); // delayed proposal for the box
+        handler.grant(0); // delayed proposal for the re-granted box
         handler.activate(0, 1); // too early: rejected
         vm.warp(block.timestamp + 7 days);
         handler.activate(0, 1); // a stranger activates at the deadline
+        handler.activate(1, 2); // candidate A's older proposal is ready too
         handler.buy(3); // purchase 2
         handler.setRejectDelivery(true);
         handler.open(1, keccak256("rejected seed")); // purchase 2 stored
@@ -390,8 +390,10 @@ contract MinterLifecycleInvariantTest is BoxTestBase {
         assertFalse(furniture.minters(address(this)));
         assertTrue(handler.anythingMinted());
         assertEq(furniture.totalSupply() != 0, handler.anythingMinted());
+        // The bootstrap is spent once and never comes back; every later grant was a proposal.
+        assertTrue(furniture.bootstrapped());
         // Exercised regimes.
-        assertGt(handler.immediateGrants(), 0);
+        assertGt(handler.grantsAfterBootstrap(), 0);
         assertGt(handler.delayedActivations(), 0);
         assertGt(handler.strangerRejections(), 0);
         assertGt(handler.directMints(), 0);

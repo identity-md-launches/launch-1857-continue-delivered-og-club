@@ -427,7 +427,7 @@ contract MultiActorInvariantTest is Test {
         vm.warp(1000);
         token = new MockOG(address(this));
         furniture = new OGClubFurniture(address(this), vault);
-        box = new OGClubBox(token, furniture, vault, address(this));
+        box = new OGClubBox(token, furniture, vault, address(this), 0);
         furniture.grantMinter(address(box));
         handler = new MultiActorHandler(box, furniture, token, address(this));
 
